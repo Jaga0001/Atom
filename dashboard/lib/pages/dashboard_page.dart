@@ -17,6 +17,7 @@ class DashboardPage extends StatefulWidget {
 class _DashboardPageState extends State<DashboardPage>
     with SingleTickerProviderStateMixin {
   List<Map<String, dynamic>> metricsData = [];
+  Map<String, dynamic>? forecastData;
   String? loadError;
   bool isLoading = true;
 
@@ -77,12 +78,14 @@ class _DashboardPageState extends State<DashboardPage>
 
   late FirebaseFirestore _firestore;
   StreamSubscription<QuerySnapshot>? _metricsSubscription;
+  StreamSubscription<DocumentSnapshot>? _forecastSubscription;
 
   @override
   void initState() {
     super.initState();
     _firestore = FirebaseFirestore.instance;
     _loadMetricsRealtime();
+    _loadForecastRealtime();
 
     // Initialize chat animation controller
     _chatAnimationController = AnimationController(
@@ -111,6 +114,7 @@ class _DashboardPageState extends State<DashboardPage>
     _chatScrollController.dispose();
     _chatAnimationController.dispose();
     _metricsSubscription?.cancel();
+    _forecastSubscription?.cancel();
     super.dispose();
   }
 
@@ -164,13 +168,38 @@ class _DashboardPageState extends State<DashboardPage>
     }
   }
 
+  void _loadForecastRealtime() {
+    try {
+      _forecastSubscription = _firestore
+          .collection('forecasts')
+          .doc('latest')
+          .snapshots()
+          .listen(
+            (snapshot) {
+              if (mounted && snapshot.exists) {
+                setState(() {
+                  forecastData = snapshot.data();
+                });
+              }
+            },
+            onError: (e) {
+              print('Failed to load forecast: $e');
+            },
+          );
+    } catch (e) {
+      print('Failed to load forecast: $e');
+    }
+  }
+
   void _refreshMetrics() {
     setState(() {
       isLoading = true;
       loadError = null;
     });
     _metricsSubscription?.cancel();
+    _forecastSubscription?.cancel();
     _loadMetricsRealtime();
+    _loadForecastRealtime();
   }
 
   List<FlSpot> _buildSpots(String metricKey, int maxPoints) {
@@ -221,6 +250,45 @@ class _DashboardPageState extends State<DashboardPage>
     final current = values.last;
 
     return {'min': min, 'max': max, 'avg': avg, 'current': current};
+  }
+
+  Map<String, dynamic> _getForecastedRiskScore() {
+    // Try to get forecasted risk_score first
+    if (forecastData != null && forecastData!['metrics'] != null) {
+      final metrics = forecastData!['metrics'] as Map<String, dynamic>?;
+        if (metrics != null && metrics['risk_score'] != null) {
+          final riskForecast = metrics['risk_score'] as Map<String, dynamic>;
+          final forecastValues = riskForecast['forecast']?['values'] as List<dynamic>?;
+
+          if (forecastValues != null && forecastValues.isNotEmpty) {
+            final values = forecastValues.map((v) => (v as num).toDouble() * 100).toList();
+            final current = values.first;
+            final avg = values.reduce((a, b) => a + b) / values.length;
+            final max = values.reduce((a, b) => a > b ? a : b);
+            final min = values.reduce((a, b) => a < b ? a : b);
+
+            return {
+              'current': current,
+              'avgPredicted': avg,
+              'maxPredicted': max,
+              'minPredicted': min,
+              'predictedValues': values,
+              'hasForecast': true,
+            };
+          }
+        }
+    }
+
+    // Fallback to historical data
+    final riskStats = _getMetricStats('risk_score');
+    return {
+      'current': (riskStats['current'] ?? 0) * 100,
+      'avgPredicted': (riskStats['avg'] ?? 0) * 100,
+      'maxPredicted': (riskStats['max'] ?? 0) * 100,
+      'minPredicted': (riskStats['min'] ?? 0) * 100,
+      'predictedValues': <double>[],
+      'hasForecast': false,
+    };
   }
 
   @override
@@ -1051,28 +1119,29 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Widget _buildRiskScorePanel() {
-    final riskStats = _getMetricStats('risk_score');
-    // Convert from 0-1 to percentage (0-100)
-    final currentRisk = (riskStats['current'] ?? 0) * 100;
-    final avgRisk = (riskStats['avg'] ?? 0);
-    final maxRisk = (riskStats['max'] ?? 0);
-    final minRisk = (riskStats['min'] ?? 0);
+    final forecastedRiskData = _getForecastedRiskScore();
+    final currentRisk = forecastedRiskData['current'] as double;
+    final predictedValues = forecastedRiskData['predictedValues'] as List<double>;
+    final avgPredicted = forecastedRiskData['avgPredicted'] as double;
+    final maxPredicted = forecastedRiskData['maxPredicted'] as double;
+    final minPredicted = forecastedRiskData['minPredicted'] as double;
+    final hasForecast = forecastedRiskData['hasForecast'] as bool;
 
     final riskLevel = currentRisk > 70
         ? 'Critical'
         : currentRisk > 40
-        ? 'Warning'
-        : currentRisk > 20
-        ? 'Moderate'
-        : 'Normal';
+            ? 'Warning'
+            : currentRisk > 20
+                ? 'Moderate'
+                : 'Normal';
 
     final riskColor = currentRisk > 70
         ? const Color(0xFFEF4444)
         : currentRisk > 40
-        ? const Color(0xFFF59E0B)
-        : currentRisk > 20
-        ? const Color(0xFF3B82F6)
-        : const Color(0xFF10B981);
+            ? const Color(0xFFF59E0B)
+            : currentRisk > 20
+                ? const Color(0xFF3B82F6)
+                : const Color(0xFF10B981);
 
     return Container(
       decoration: BoxDecoration(
@@ -1110,11 +1179,11 @@ class _DashboardPageState extends State<DashboardPage>
                   ),
                 ),
                 const SizedBox(width: 12),
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
+                      const Text(
                         'Risk Assessment',
                         style: TextStyle(
                           color: Colors.white,
@@ -1122,9 +1191,23 @@ class _DashboardPageState extends State<DashboardPage>
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      Text(
-                        'System Health Monitor',
-                        style: TextStyle(color: Colors.white54, fontSize: 12),
+                      Row(
+                        children: [
+                          Icon(
+                            hasForecast ? Icons.auto_graph_rounded : Icons.history_rounded,
+                            color: hasForecast ? const Color(0xFF8B5CF6) : Colors.white54,
+                            size: 12,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            hasForecast ? 'AI Predicted' : 'Historical Data',
+                            style: TextStyle(
+                              color: hasForecast ? const Color(0xFF8B5CF6) : Colors.white54,
+                              fontSize: 12,
+                              fontWeight: hasForecast ? FontWeight.w600 : FontWeight.normal,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -1162,7 +1245,7 @@ class _DashboardPageState extends State<DashboardPage>
                             ),
                           ),
                           Text(
-                            'Risk Score',
+                            hasForecast ? 'Predicted Risk' : 'Risk Score',
                             style: TextStyle(
                               color: Colors.white.withOpacity(0.6),
                               fontSize: 13,
@@ -1190,10 +1273,10 @@ class _DashboardPageState extends State<DashboardPage>
                           currentRisk > 70
                               ? Icons.dangerous_rounded
                               : currentRisk > 40
-                              ? Icons.warning_amber_rounded
-                              : currentRisk > 20
-                              ? Icons.info_rounded
-                              : Icons.check_circle_rounded,
+                                  ? Icons.warning_amber_rounded
+                                  : currentRisk > 20
+                                      ? Icons.info_rounded
+                                      : Icons.check_circle_rounded,
                           color: riskColor,
                           size: 18,
                         ),
@@ -1215,11 +1298,21 @@ class _DashboardPageState extends State<DashboardPage>
             const SizedBox(height: 28),
             Container(height: 1, color: Colors.white.withOpacity(0.1)),
             const SizedBox(height: 20),
-            _buildRiskStatRow('Average', avgRisk, const Color(0xFF3B82F6)),
-            const SizedBox(height: 12),
-            _buildRiskStatRow('Maximum', maxRisk, const Color(0xFFEF4444)),
-            const SizedBox(height: 12),
-            _buildRiskStatRow('Minimum', minRisk, const Color(0xFF10B981)),
+            if (hasForecast) ... [
+              _buildRiskStatRow('Avg Predicted', avgPredicted, const Color(0xFF3B82F6)),
+              const SizedBox(height: 12),
+              _buildRiskStatRow('Max Predicted', maxPredicted, const Color(0xFFEF4444)),
+              const SizedBox(height: 12),
+              _buildRiskStatRow('Min Predicted', minPredicted, const Color(0xFF10B981)),
+              const SizedBox(height: 12),
+              _buildRiskStatRow('Forecast Points', predictedValues.length.toDouble(), const Color(0xFF8B5CF6), isCount: true),
+            ] else ... [
+              _buildRiskStatRow('Average', avgPredicted, const Color(0xFF3B82F6)),
+              const SizedBox(height: 12),
+              _buildRiskStatRow('Maximum', maxPredicted, const Color(0xFFEF4444)),
+              const SizedBox(height: 12),
+              _buildRiskStatRow('Minimum', minPredicted, const Color(0xFF10B981)),
+            ],
             const SizedBox(height: 24),
             Container(
               padding: const EdgeInsets.all(16),
@@ -1251,10 +1344,10 @@ class _DashboardPageState extends State<DashboardPage>
                       currentRisk > 70
                           ? 'Immediate attention required'
                           : currentRisk > 40
-                          ? 'Monitor closely for issues'
-                          : currentRisk > 20
-                          ? 'System operating normally'
-                          : 'All systems optimal',
+                              ? 'Monitor closely for issues'
+                              : currentRisk > 20
+                                  ? 'System operating normally'
+                                  : 'All systems optimal',
                       style: TextStyle(
                         color: Colors.white.withOpacity(0.8),
                         fontSize: 13,
@@ -1270,7 +1363,7 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  Widget _buildRiskStatRow(String label, double value, Color color) {
+  Widget _buildRiskStatRow(String label, double value, Color color, {bool isCount = false}) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
@@ -1287,7 +1380,7 @@ class _DashboardPageState extends State<DashboardPage>
             ),
             const SizedBox(width: 8),
             Text(
-              '${value.toStringAsFixed(2)}%',
+              isCount ? value.toInt().toString() : '${value.toStringAsFixed(2)}%',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 14,
