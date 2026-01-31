@@ -3,6 +3,15 @@ from flask_cors import CORS
 from groq import Groq
 from metrics_collector import MetricsCollector
 import os
+import time
+from datetime import datetime
+from prometheus_client import CollectorRegistry, Gauge, Counter, Histogram
+import numpy as np
+from collections import deque
+import requests
+import firebase_admin
+from firebase_admin import credentials, firestore
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -30,12 +39,9 @@ Help ML Engineers, SREs, Backend Architects, and Platform Engineers shift from r
 # Conversation history
 history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-# Ensure data directory exists
-os.makedirs('data', exist_ok=True)
-
-# Use the proper MetricsCollector from metrics_collector.py
+# Initialize Firestore MetricsCollector with service account key
 metrics_service = MetricsCollector(
-    db_path='data/metrics.db',
+    credentials_path="serviceAccountKey.json",
     prometheus_url='http://localhost:9090'
 )
 
@@ -73,7 +79,7 @@ def chat():
 
 @app.route('/metrics', methods=['GET'])
 def get_metrics():
-    """Get latest metrics from database."""
+    """Get latest metrics from Firestore."""
     try:
         limit = request.args.get('limit', 100, type=int)
         metrics = metrics_service.get_latest_metrics(limit)

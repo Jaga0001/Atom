@@ -1,4 +1,3 @@
-import sqlite3
 import time
 from datetime import datetime
 from prometheus_client import CollectorRegistry, Gauge, Counter, Histogram
@@ -6,12 +5,15 @@ import threading
 import numpy as np
 from collections import deque
 import requests
+import firebase_admin
+from firebase_admin import credentials, firestore
+import os
 
 class MetricsCollector:
-    def __init__(self, db_path="data/metrics.db", prometheus_url="http://localhost:9090"):
-        self.db_path = db_path
+    def __init__(self, credentials_path="serviceAccountKey.json", prometheus_url="http://localhost:9090"):
         self.prometheus_url = prometheus_url
-        self.init_database()
+        self.credentials_path = credentials_path
+        self.init_firestore()
         
         # Prometheus metrics
         self.registry = CollectorRegistry()
@@ -31,29 +33,18 @@ class MetricsCollector:
         # History for slope calculation
         self.history = deque(maxlen=10)
     
-    def init_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS metrics (
-                id INTEGER PRIMARY KEY,
-                timestamp TEXT,
-                latency REAL,
-                error_rate REAL,
-                cpu REAL,
-                memory REAL,
-                request_time REAL,
-                latency_anomaly BOOLEAN,
-                latency_slope REAL,
-                memory_slope REAL,
-                error_trend REAL,
-                risk_score REAL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        conn.close()
+    def init_firestore(self):
+        """Initialize Firebase and Firestore connection"""
+        try:
+            # Check if Firebase app is already initialized
+            if not firebase_admin._apps:
+                cred = credentials.Certificate(self.credentials_path)
+                firebase_admin.initialize_app(cred)
+            
+            self.db = firestore.client()
+        except Exception as e:
+            print(f"Firestore initialization error: {e}")
+            raise
     
     def query_prometheus(self, query):
         """Query Prometheus and return the result value."""
@@ -121,7 +112,7 @@ class MetricsCollector:
         return min(score, 100)
     
     def add_data_point(self):
-        """Collect metrics and add to database"""
+        """Collect metrics and add to Firestore"""
         metrics = self.collect_metrics()
         
         # Add to history
@@ -147,44 +138,45 @@ class MetricsCollector:
             memory_slope
         )
         
-        # Insert into database
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO metrics (
-                timestamp, latency, error_rate, cpu, memory, request_time,
-                latency_anomaly, latency_slope, memory_slope, error_trend, risk_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            metrics['timestamp'],
-            metrics['latency'],
-            metrics['error_rate'],
-            metrics['cpu'],
-            metrics['memory'],
-            metrics['request_time'],
-            latency_anomaly,
-            latency_slope,
-            memory_slope,
-            error_trend,
-            risk_score
-        ))
-        
-        conn.commit()
-        conn.close()
+        # Create document in Firestore
+        try:
+            doc_data = {
+                'timestamp': metrics['timestamp'],
+                'latency': metrics['latency'],
+                'error_rate': metrics['error_rate'],
+                'cpu': metrics['cpu'],
+                'memory': metrics['memory'],
+                'request_time': metrics['request_time'],
+                'latency_anomaly': latency_anomaly,
+                'latency_slope': latency_slope,
+                'memory_slope': memory_slope,
+                'error_trend': error_trend,
+                'risk_score': risk_score,
+                'created_at': datetime.now()
+            }
+            
+            # Add document with auto-generated ID
+            self.db.collection('metrics').add(doc_data)
+        except Exception as e:
+            print(f"Firestore write error: {e}")
     
     def get_latest_metrics(self, limit=100):
-        """Get latest metrics from database."""
+        """Get latest metrics from Firestore."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM metrics ORDER BY created_at DESC LIMIT ?", (limit,))
-            columns = [description[0] for description in cursor.description]
-            metrics = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            conn.close()
+            query = self.db.collection('metrics').order_by(
+                'created_at', direction=firestore.Query.DESCENDING
+            ).limit(limit)
+            
+            docs = query.stream()
+            metrics = []
+            for doc in docs:
+                metric = doc.to_dict()
+                metric['id'] = doc.id
+                metrics.append(metric)
+            
             return metrics
         except Exception as e:
-            print(f"Metrics retrieval error: {e}")
+            print(f"Firestore retrieval error: {e}")
             return []
 
     def start_collector(self):
