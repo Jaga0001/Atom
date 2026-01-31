@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dashboard/pages/analytics_page.dart';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:http/http.dart' as http;
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -68,6 +70,10 @@ class _DashboardPageState extends State<DashboardPage>
       icon: Icons.developer_board_rounded,
     ),
   ];
+
+  // Chat API configuration
+  static const String _chatApiUrl = 'https://atom-1-jvh4.onrender.com/chat';
+  bool _isSendingMessage = false;
 
   late FirebaseFirestore _firestore;
   StreamSubscription<QuerySnapshot>? _metricsSubscription;
@@ -1048,9 +1054,9 @@ class _DashboardPageState extends State<DashboardPage>
     final riskStats = _getMetricStats('risk_score');
     // Convert from 0-1 to percentage (0-100)
     final currentRisk = (riskStats['current'] ?? 0) * 100;
-    final avgRisk = (riskStats['avg'] ?? 0) * 100;
-    final maxRisk = (riskStats['max'] ?? 0) * 100;
-    final minRisk = (riskStats['min'] ?? 0) * 100;
+    final avgRisk = (riskStats['avg'] ?? 0);
+    final maxRisk = (riskStats['max'] ?? 0);
+    final minRisk = (riskStats['min'] ?? 0);
 
     final riskLevel = currentRisk > 70
         ? 'Critical'
@@ -1365,8 +1371,54 @@ class _DashboardPageState extends State<DashboardPage>
             child: ListView.builder(
               controller: _chatScrollController,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              itemCount: _messages.length,
+              itemCount: _messages.length + (_isSendingMessage ? 1 : 0),
               itemBuilder: (context, index) {
+                // Show typing indicator while waiting for response
+                if (_isSendingMessage && index == _messages.length) {
+                  return Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(
+                        vertical: 6,
+                        horizontal: 6,
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.06),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.08),
+                          width: 1,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: const Color(0xFF6366F1).withOpacity(0.7),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            'Thinking...',
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.5),
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+
                 final msg = _messages[index];
                 final isAssistant = msg.role == ChatRole.assistant;
                 return Align(
@@ -1411,10 +1463,13 @@ class _DashboardPageState extends State<DashboardPage>
                     controller: _chatController,
                     minLines: 1,
                     maxLines: 4,
+                    enabled: !_isSendingMessage,
                     style: const TextStyle(color: Colors.white),
                     onSubmitted: (_) => _sendMessage(),
                     decoration: InputDecoration(
-                      hintText: 'Ask the ATOM assistant…',
+                      hintText: _isSendingMessage
+                          ? 'Waiting for response...'
+                          : 'Ask the ATOM assistant…',
                       hintStyle: TextStyle(
                         color: Colors.white.withOpacity(0.5),
                       ),
@@ -1450,9 +1505,11 @@ class _DashboardPageState extends State<DashboardPage>
                 ),
                 const SizedBox(width: 10),
                 ElevatedButton(
-                  onPressed: _sendMessage,
+                  onPressed: _isSendingMessage ? null : _sendMessage,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6366F1),
+                    backgroundColor: _isSendingMessage
+                        ? const Color(0xFF6366F1).withOpacity(0.5)
+                        : const Color(0xFF6366F1),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,
@@ -1462,14 +1519,23 @@ class _DashboardPageState extends State<DashboardPage>
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.send_rounded, size: 18),
-                      SizedBox(width: 6),
-                      Text('Send'),
-                    ],
-                  ),
+                  child: _isSendingMessage
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.send_rounded, size: 18),
+                            SizedBox(width: 6),
+                            Text('Send'),
+                          ],
+                        ),
                 ),
               ],
             ),
@@ -1479,13 +1545,70 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  void _sendMessage() {
+  void _sendMessage() async {
     final text = _chatController.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty || _isSendingMessage) return;
+
     setState(() {
       _messages.add(_ChatMessage(role: ChatRole.user, text: text));
       _chatController.clear();
+      _isSendingMessage = true;
     });
+
+    _scrollToBottom();
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse(_chatApiUrl),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'question': text}),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      if (mounted) {
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body);
+          final answer =
+              data['answer'] ?? data['response'] ?? 'No response received.';
+          setState(() {
+            _messages.add(_ChatMessage(role: ChatRole.assistant, text: answer));
+          });
+        } else {
+          setState(() {
+            _messages.add(
+              _ChatMessage(
+                role: ChatRole.assistant,
+                text:
+                    'Sorry, I encountered an error (${response.statusCode}). Please try again.',
+              ),
+            );
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _messages.add(
+            _ChatMessage(
+              role: ChatRole.assistant,
+              text:
+                  'Sorry, I couldn\'t connect to the server. Please check your connection and try again.',
+            ),
+          );
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSendingMessage = false;
+        });
+        _scrollToBottom();
+      }
+    }
+  }
+
+  void _scrollToBottom() {
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_chatScrollController.hasClients) {
         _chatScrollController.animateTo(
