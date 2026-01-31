@@ -29,7 +29,7 @@ class SqlAgentCrew():
                 get_schema_tool,
                 run_sql_tool,
             ],
-            verbose=True,
+            verbose=False,
             max_iter=3,
         )
         
