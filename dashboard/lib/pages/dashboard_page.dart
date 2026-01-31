@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math'; // Add this import for Random
 
 import 'package:dashboard/pages/analytics_page.dart';
 import 'package:flutter/material.dart';
@@ -40,7 +41,7 @@ class _DashboardPageState extends State<DashboardPage>
   late Animation<Offset> _chatSlideAnimation;
   late Animation<double> _chatFadeAnimation;
 
-  // Main metrics to display - Latency, Memory, Error Rate, CPU
+  // Main metrics to display - Latency, Memory, Error FRate, CPU
   static const List<MetricConfig> mainMetrics = [
     MetricConfig(
       key: 'latency',
@@ -73,12 +74,57 @@ class _DashboardPageState extends State<DashboardPage>
   ];
 
   // Chat API configuration
-  static const String _chatApiUrl = 'https://atom-1-jvh4.onrender.com/chat';
+  static const String _chatApiUrl = 'https://atom-agentic.onrender.com';
   bool _isSendingMessage = false;
 
   late FirebaseFirestore _firestore;
   StreamSubscription<QuerySnapshot>? _metricsSubscription;
   StreamSubscription<DocumentSnapshot>? _forecastSubscription;
+
+  // Forecast timer state
+  Timer? _forecastTimer;
+  Duration _timeUntilNextForecast = Duration.zero;
+
+  // Recommendations data
+  static const List<Map<String, String>> _riskRecommendations = [
+    {
+      'cause': 'High CPU utilization detected',
+      'recommendation':
+          'Consider scaling horizontally by adding more instances or optimizing CPU-intensive operations. Review recent deployments for resource-heavy processes.',
+    },
+    {
+      'cause': 'Memory pressure increasing',
+      'recommendation':
+          'Analyze memory allocation patterns and check for potential memory leaks. Consider implementing garbage collection optimization or increasing instance memory.',
+    },
+    {
+      'cause': 'Elevated error rate observed',
+      'recommendation':
+          'Review application logs for recurring exceptions. Implement circuit breakers and retry mechanisms for external service calls.',
+    },
+    {
+      'cause': 'Latency spikes detected',
+      'recommendation':
+          'Optimize database queries and consider implementing caching strategies. Review network configurations and check for downstream service bottlenecks.',
+    },
+    {
+      'cause': 'Resource contention identified',
+      'recommendation':
+          'Implement request throttling and load balancing. Consider async processing for non-critical operations to reduce system load.',
+    },
+    {
+      'cause': 'Anomalous traffic patterns',
+      'recommendation':
+          'Enable auto-scaling policies and review rate limiting configurations. Monitor for potential DDoS patterns and validate traffic sources.',
+    },
+    {
+      'cause': 'Service degradation warning',
+      'recommendation':
+          'Check health of dependent services and database connections. Implement fallback mechanisms and graceful degradation strategies.',
+    },
+  ];
+
+  int _currentRecommendationIndex = 0;
 
   @override
   void initState() {
@@ -86,6 +132,8 @@ class _DashboardPageState extends State<DashboardPage>
     _firestore = FirebaseFirestore.instance;
     _loadMetricsRealtime();
     _loadForecastRealtime();
+    _startForecastTimer();
+    _currentRecommendationIndex = Random().nextInt(_riskRecommendations.length);
 
     // Initialize chat animation controller
     _chatAnimationController = AnimationController(
@@ -115,7 +163,59 @@ class _DashboardPageState extends State<DashboardPage>
     _chatAnimationController.dispose();
     _metricsSubscription?.cancel();
     _forecastSubscription?.cancel();
+    _forecastTimer?.cancel();
     super.dispose();
+  }
+
+  void _startForecastTimer() {
+    _updateTimeUntilNextForecast();
+    _forecastTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _updateTimeUntilNextForecast();
+    });
+  }
+
+  void _updateTimeUntilNextForecast() {
+    final now = DateTime.now();
+    // Forecasts run at the top of every hour
+    final nextHour = DateTime(now.year, now.month, now.day, now.hour + 1, 0, 0);
+    final newTimeUntilNextForecast = nextHour.difference(now);
+
+    // Check if we just crossed the hour boundary (timer was > 0 and now would be <= 0 or wrapped)
+    if (_timeUntilNextForecast.inSeconds > 0 &&
+        _timeUntilNextForecast.inSeconds <= 2 &&
+        newTimeUntilNextForecast.inMinutes > 58) {
+      // Timer just reset - trigger full reload
+      _performFullStateReload();
+    }
+
+    if (mounted) {
+      setState(() {
+        _timeUntilNextForecast = newTimeUntilNextForecast;
+      });
+    }
+  }
+
+  void _performFullStateReload() {
+    // Cancel existing subscriptions
+    _metricsSubscription?.cancel();
+    _forecastSubscription?.cancel();
+
+    // Reset state
+    if (mounted) {
+      setState(() {
+        isLoading = true;
+        loadError = null;
+        metricsData = [];
+        forecastData = null;
+        // Rotate to next recommendation
+        _currentRecommendationIndex =
+            (_currentRecommendationIndex + 1) % _riskRecommendations.length;
+      });
+    }
+
+    // Reload all data
+    _loadMetricsRealtime();
+    _loadForecastRealtime();
   }
 
   void _toggleChat() {
@@ -253,39 +353,106 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Map<String, dynamic> _getForecastedRiskScore() {
-    // Try to get forecasted risk_score first
-    if (forecastData != null && forecastData!['metrics'] != null) {
-      final metrics = forecastData!['metrics'] as Map<String, dynamic>?;
-        if (metrics != null && metrics['risk_score'] != null) {
-          final riskForecast = metrics['risk_score'] as Map<String, dynamic>;
-          final forecastValues = riskForecast['forecast']?['values'] as List<dynamic>?;
-
-          if (forecastValues != null && forecastValues.isNotEmpty) {
-            final values = forecastValues.map((v) => (v as num).toDouble() * 100).toList();
-            final current = values.first;
-            final avg = values.reduce((a, b) => a + b) / values.length;
-            final max = values.reduce((a, b) => a > b ? a : b);
-            final min = values.reduce((a, b) => a < b ? a : b);
-
-            return {
-              'current': current,
-              'avgPredicted': avg,
-              'maxPredicted': max,
-              'minPredicted': min,
-              'predictedValues': values,
-              'hasForecast': true,
-            };
-          }
-        }
+    // Debug: Print forecast data structure
+    if (forecastData != null) {
+      print('Forecast data keys: ${forecastData!.keys.toList()}');
+      if (forecastData!['risk_score'] != null) {
+        print('risk_score type: ${forecastData!['risk_score'].runtimeType}');
+        print('risk_score value: ${forecastData!['risk_score']}');
+      }
     }
 
-    // Fallback to historical data
+    // Try to get forecasted risk_score first
+    // Path: forecasts -> latest -> risk_score
+    if (forecastData != null && forecastData!['risk_score'] != null) {
+      final riskScoreData = forecastData!['risk_score'];
+
+      // Case 1: risk_score is a direct list of values [41, 47.6, ...]
+      if (riskScoreData is List && riskScoreData.isNotEmpty) {
+        final values = riskScoreData.map((v) => (v as num).toDouble()).toList();
+        final current =
+            values.last; // Use last value as current (most recent prediction)
+        final avg = values.reduce((a, b) => a + b) / values.length;
+        final max = values.reduce((a, b) => a > b ? a : b);
+        final min = values.reduce((a, b) => a < b ? a : b);
+
+        return {
+          'current': current,
+          'avgPredicted': avg,
+          'maxPredicted': max,
+          'minPredicted': min,
+          'predictedValues': values,
+          'hasForecast': true,
+        };
+      }
+
+      // Case 2: risk_score is a Map with nested structure
+      if (riskScoreData is Map<String, dynamic>) {
+        // Try 'value' field first
+        final valueData = riskScoreData['value'] ?? riskScoreData['values'];
+
+        if (valueData is List && valueData.isNotEmpty) {
+          final values = valueData.map((v) => (v as num).toDouble()).toList();
+          final current = values.last;
+          final avg = values.reduce((a, b) => a + b) / values.length;
+          final max = values.reduce((a, b) => a > b ? a : b);
+          final min = values.reduce((a, b) => a < b ? a : b);
+
+          return {
+            'current': current,
+            'avgPredicted': avg,
+            'maxPredicted': max,
+            'minPredicted': min,
+            'predictedValues': values,
+            'hasForecast': true,
+          };
+        }
+
+        // Single value in 'value' field
+        if (valueData is num) {
+          final value = valueData.toDouble();
+          return {
+            'current': value,
+            'avgPredicted': value,
+            'maxPredicted': value,
+            'minPredicted': value,
+            'predictedValues': <double>[value],
+            'hasForecast': true,
+          };
+        }
+      }
+
+      // Case 3: risk_score is a single number
+      if (riskScoreData is num) {
+        final value = riskScoreData.toDouble();
+        return {
+          'current': value,
+          'avgPredicted': value,
+          'maxPredicted': value,
+          'minPredicted': value,
+          'predictedValues': <double>[value],
+          'hasForecast': true,
+        };
+      }
+    }
+
+    // Fallback to historical data from metrics collection
+    // Note: risk_score in metrics is stored as decimal (0-1), so multiply by 100 for percentage
     final riskStats = _getMetricStats('risk_score');
+    final current = (riskStats['current'] ?? 0);
+    final avg = (riskStats['avg'] ?? 0);
+    final max = (riskStats['max'] ?? 0);
+    final min = (riskStats['min'] ?? 0);
+
+    // Check if values are already in percentage format (> 1) or decimal format (0-1)
+    final isDecimalFormat = current <= 1 && avg <= 1 && max <= 1;
+    final multiplier = isDecimalFormat ? 100.0 : 1.0;
+
     return {
-      'current': (riskStats['current'] ?? 0) * 100,
-      'avgPredicted': (riskStats['avg'] ?? 0) * 100,
-      'maxPredicted': (riskStats['max'] ?? 0) * 100,
-      'minPredicted': (riskStats['min'] ?? 0) * 100,
+      'current': current * multiplier,
+      'avgPredicted': avg * multiplier,
+      'maxPredicted': max * multiplier,
+      'minPredicted': min * multiplier,
       'predictedValues': <double>[],
       'hasForecast': false,
     };
@@ -1121,27 +1288,33 @@ class _DashboardPageState extends State<DashboardPage>
   Widget _buildRiskScorePanel() {
     final forecastedRiskData = _getForecastedRiskScore();
     final currentRisk = forecastedRiskData['current'] as double;
-    final predictedValues = forecastedRiskData['predictedValues'] as List<double>;
+    final predictedValues =
+        forecastedRiskData['predictedValues'] as List<double>;
     final avgPredicted = forecastedRiskData['avgPredicted'] as double;
     final maxPredicted = forecastedRiskData['maxPredicted'] as double;
     final minPredicted = forecastedRiskData['minPredicted'] as double;
     final hasForecast = forecastedRiskData['hasForecast'] as bool;
 
-    final riskLevel = currentRisk > 70
-        ? 'Critical'
-        : currentRisk > 40
-            ? 'Warning'
-            : currentRisk > 20
-                ? 'Moderate'
-                : 'Normal';
+    // Use average as the main display value
+    final displayRisk = avgPredicted;
 
-    final riskColor = currentRisk > 70
+    final riskLevel = displayRisk > 70
+        ? 'Critical'
+        : displayRisk > 40
+        ? 'Warning'
+        : displayRisk > 20
+        ? 'Moderate'
+        : 'Normal';
+
+    final riskColor = displayRisk > 70
         ? const Color(0xFFEF4444)
-        : currentRisk > 40
-            ? const Color(0xFFF59E0B)
-            : currentRisk > 20
-                ? const Color(0xFF3B82F6)
-                : const Color(0xFF10B981);
+        : displayRisk > 40
+        ? const Color(0xFFF59E0B)
+        : displayRisk > 20
+        ? const Color(0xFF3B82F6)
+        : const Color(0xFF10B981);
+
+    final isRiskElevated = displayRisk > 20;
 
     return Container(
       decoration: BoxDecoration(
@@ -1194,17 +1367,25 @@ class _DashboardPageState extends State<DashboardPage>
                       Row(
                         children: [
                           Icon(
-                            hasForecast ? Icons.auto_graph_rounded : Icons.history_rounded,
-                            color: hasForecast ? const Color(0xFF8B5CF6) : Colors.white54,
+                            hasForecast
+                                ? Icons.auto_graph_rounded
+                                : Icons.history_rounded,
+                            color: hasForecast
+                                ? const Color(0xFF8B5CF6)
+                                : Colors.white54,
                             size: 12,
                           ),
                           const SizedBox(width: 4),
                           Text(
                             hasForecast ? 'AI Predicted' : 'Historical Data',
                             style: TextStyle(
-                              color: hasForecast ? const Color(0xFF8B5CF6) : Colors.white54,
+                              color: hasForecast
+                                  ? const Color(0xFF8B5CF6)
+                                  : Colors.white54,
                               fontSize: 12,
-                              fontWeight: hasForecast ? FontWeight.w600 : FontWeight.normal,
+                              fontWeight: hasForecast
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
                             ),
                           ),
                         ],
@@ -1214,7 +1395,10 @@ class _DashboardPageState extends State<DashboardPage>
                 ),
               ],
             ),
-            const SizedBox(height: 28),
+            const SizedBox(height: 20),
+            // Next Forecast Timer Widget
+            _buildNextForecastTimer(),
+            const SizedBox(height: 24),
             Center(
               child: Column(
                 children: [
@@ -1225,7 +1409,7 @@ class _DashboardPageState extends State<DashboardPage>
                         width: 160,
                         height: 160,
                         child: CircularProgressIndicator(
-                          value: (currentRisk / 100).clamp(0.0, 1.0),
+                          value: (displayRisk / 100).clamp(0.0, 1.0),
                           strokeWidth: 12,
                           backgroundColor: Colors.white.withOpacity(0.1),
                           valueColor: AlwaysStoppedAnimation<Color>(riskColor),
@@ -1236,7 +1420,7 @@ class _DashboardPageState extends State<DashboardPage>
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            currentRisk.toStringAsFixed(1),
+                            displayRisk.toStringAsFixed(1),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 42,
@@ -1245,7 +1429,9 @@ class _DashboardPageState extends State<DashboardPage>
                             ),
                           ),
                           Text(
-                            hasForecast ? 'Predicted Risk' : 'Risk Score',
+                            hasForecast
+                                ? 'Avg Predicted Risk'
+                                : 'Avg Risk Score',
                             style: TextStyle(
                               color: Colors.white.withOpacity(0.6),
                               fontSize: 13,
@@ -1270,13 +1456,13 @@ class _DashboardPageState extends State<DashboardPage>
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          currentRisk > 70
+                          displayRisk > 70
                               ? Icons.dangerous_rounded
-                              : currentRisk > 40
-                                  ? Icons.warning_amber_rounded
-                                  : currentRisk > 20
-                                      ? Icons.info_rounded
-                                      : Icons.check_circle_rounded,
+                              : displayRisk > 40
+                              ? Icons.warning_amber_rounded
+                              : displayRisk > 20
+                              ? Icons.info_rounded
+                              : Icons.check_circle_rounded,
                           color: riskColor,
                           size: 18,
                         ),
@@ -1298,20 +1484,56 @@ class _DashboardPageState extends State<DashboardPage>
             const SizedBox(height: 28),
             Container(height: 1, color: Colors.white.withOpacity(0.1)),
             const SizedBox(height: 20),
-            if (hasForecast) ... [
-              _buildRiskStatRow('Avg Predicted', avgPredicted, const Color(0xFF3B82F6)),
+            // Show recommendation alert if risk is elevated, otherwise show "All Good"
+            if (isRiskElevated)
+              _buildRiskAlertCard(displayRisk, riskColor)
+            else
+              _buildAllGoodCard(),
+            const SizedBox(height: 20),
+            // ...existing code for stats rows...
+            if (hasForecast) ...[
+              _buildRiskStatRow(
+                'Current',
+                currentRisk,
+                const Color(0xFF8B5CF6),
+              ),
               const SizedBox(height: 12),
-              _buildRiskStatRow('Max Predicted', maxPredicted, const Color(0xFFEF4444)),
+              _buildRiskStatRow(
+                'Max Predicted',
+                maxPredicted,
+                const Color(0xFFEF4444),
+              ),
               const SizedBox(height: 12),
-              _buildRiskStatRow('Min Predicted', minPredicted, const Color(0xFF10B981)),
+              _buildRiskStatRow(
+                'Min Predicted',
+                minPredicted,
+                const Color(0xFF10B981),
+              ),
               const SizedBox(height: 12),
-              _buildRiskStatRow('Forecast Points', predictedValues.length.toDouble(), const Color(0xFF8B5CF6), isCount: true),
-            ] else ... [
-              _buildRiskStatRow('Average', avgPredicted, const Color(0xFF3B82F6)),
+              _buildRiskStatRow(
+                'Forecast Points',
+                predictedValues.length.toDouble(),
+                const Color(0xFF3B82F6),
+                isCount: true,
+              ),
+            ] else ...[
+              _buildRiskStatRow(
+                'Current',
+                currentRisk,
+                const Color(0xFF8B5CF6),
+              ),
               const SizedBox(height: 12),
-              _buildRiskStatRow('Maximum', maxPredicted, const Color(0xFFEF4444)),
+              _buildRiskStatRow(
+                'Maximum',
+                maxPredicted,
+                const Color(0xFFEF4444),
+              ),
               const SizedBox(height: 12),
-              _buildRiskStatRow('Minimum', minPredicted, const Color(0xFF10B981)),
+              _buildRiskStatRow(
+                'Minimum',
+                minPredicted,
+                const Color(0xFF10B981),
+              ),
             ],
             const SizedBox(height: 24),
             Container(
@@ -1341,13 +1563,13 @@ class _DashboardPageState extends State<DashboardPage>
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      currentRisk > 70
+                      displayRisk > 70
                           ? 'Immediate attention required'
-                          : currentRisk > 40
-                              ? 'Monitor closely for issues'
-                              : currentRisk > 20
-                                  ? 'System operating normally'
-                                  : 'All systems optimal',
+                          : displayRisk > 40
+                          ? 'Monitor closely for issues'
+                          : displayRisk > 20
+                          ? 'System operating normally'
+                          : 'All systems optimal',
                       style: TextStyle(
                         color: Colors.white.withOpacity(0.8),
                         fontSize: 13,
@@ -1363,7 +1585,303 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  Widget _buildRiskStatRow(String label, double value, Color color, {bool isCount = false}) {
+  Widget _buildNextForecastTimer() {
+    final minutes = _timeUntilNextForecast.inMinutes;
+    final seconds = _timeUntilNextForecast.inSeconds % 60;
+    final totalSeconds = _timeUntilNextForecast.inSeconds;
+    final progress = 1.0 - (totalSeconds / 3600.0); // Progress through the hour
+
+    final isImminent = minutes < 5;
+    final isVerySoon = minutes < 1;
+
+    final timerColor = isVerySoon
+        ? const Color(0xFF10B981)
+        : isImminent
+        ? const Color(0xFFF59E0B)
+        : const Color(0xFF8B5CF6);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [timerColor.withOpacity(0.12), timerColor.withOpacity(0.04)],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: timerColor.withOpacity(0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: timerColor.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  isVerySoon
+                      ? Icons.rocket_launch_rounded
+                      : isImminent
+                      ? Icons.timelapse_rounded
+                      : Icons.schedule_rounded,
+                  color: timerColor,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          'Next Forcast',
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.9),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (isImminent)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: timerColor.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (isVerySoon)
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 4),
+                                    child: SizedBox(
+                                      width: 8,
+                                      height: 8,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 1.5,
+                                        color: timerColor,
+                                      ),
+                                    ),
+                                  ),
+                                Text(
+                                  isVerySoon ? 'Imminent' : 'Soon',
+                                  style: TextStyle(
+                                    color: timerColor,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 0.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          minutes.toString().padLeft(2, '0'),
+                          style: TextStyle(
+                            color: timerColor,
+                            fontSize: 28,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -1,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: Text(
+                            ':',
+                            style: TextStyle(
+                              color: timerColor.withOpacity(0.7),
+                              fontSize: 24,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          seconds.toString().padLeft(2, '0'),
+                          style: TextStyle(
+                            color: timerColor,
+                            fontSize: 28,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -1,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 2),
+                          child: Text(
+                            'remaining',
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.4),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          // Progress bar
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [],
+              ),
+              const SizedBox(height: 6),
+              Stack(
+                children: [
+                  Container(
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  FractionallySizedBox(
+                    widthFactor: progress.clamp(0.0, 1.0),
+                    child: Container(
+                      height: 4,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [timerColor.withOpacity(0.6), timerColor],
+                        ),
+                        borderRadius: BorderRadius.circular(2),
+                        boxShadow: [
+                          BoxShadow(
+                            color: timerColor.withOpacity(0.4),
+                            blurRadius: 4,
+                            offset: const Offset(0, 1),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRiskAlertCard(double displayRisk, Color riskColor) {
+    final recommendation = _riskRecommendations[_currentRecommendationIndex];
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: riskColor.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: riskColor.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: riskColor, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  recommendation['cause'] ?? 'Risk Detected',
+                  style: TextStyle(
+                    color: riskColor,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            recommendation['recommendation'] ?? '',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.7),
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAllGoodCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF10B981).withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF10B981).withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.check_circle_rounded,
+            color: Color(0xFF10B981),
+            size: 24,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'All Systems Healthy',
+                  style: TextStyle(
+                    color: Color(0xFF10B981),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'No immediate concerns detected. Continue monitoring.',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.6),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRiskStatRow(
+    String label,
+    double value,
+    Color color, {
+    bool isCount = false,
+  }) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
@@ -1380,7 +1898,9 @@ class _DashboardPageState extends State<DashboardPage>
             ),
             const SizedBox(width: 8),
             Text(
-              isCount ? value.toInt().toString() : '${value.toStringAsFixed(2)}%',
+              isCount
+                  ? value.toInt().toString()
+                  : '${value.toStringAsFixed(2)}%',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 14,
