@@ -1,0 +1,12 @@
+system_explanation_task:
+  description: >
+    Answer the user's question: {question}
+    
+    Steps:
+    1. Use get_schema_info to see available tables
+    2. Write an efficient SQL query (use LIMIT, specific columns, filters)
+    3. Execute with run_sql
+    4. Explain the results clearly
+  expected_output: >
+    A clear answer to the question with supporting data from the database.
+  agent: sre_system_explainer
