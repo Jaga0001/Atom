@@ -41,7 +41,7 @@ history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 # Initialize Firestore MetricsCollector with service account key
 metrics_service = MetricsCollector(
-    credentials_path="serviceAccountKey.json",
+    credentials_path="key.json",
     prometheus_url='http://localhost:9090'
 )
 
