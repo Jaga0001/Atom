@@ -2,7 +2,7 @@ import sqlite3
 import os
 
 # Configure your database path here (should match db.py)
-DATABASE_PATH = os.path.join(os.path.dirname(__file__), "C:\Karan program\Atom\sql_agent\data\metrics.db")  
+DATABASE_PATH = "data/metrics.db"  
 
 
 def load_schema() -> str:

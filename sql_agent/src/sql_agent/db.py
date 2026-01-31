@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 _last_query_result: Optional[Dict[str, Any]] = None
 
 # Use absolute path - update this to your actual database location
-DATABASE_PATH = os.path.join(os.path.dirname(__file__), "C:\Karan program\Atom\sql_agent\data\metrics.db")
+DATABASE_PATH = "data/metrics.db"
 
 MAX_ROWS = 1000 
 
