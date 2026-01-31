@@ -1,6 +1,6 @@
 Flask
 Flask-Cors
-crewai
+crewai[google-genai]
 firebase-admin
 python-dotenv
 requests
