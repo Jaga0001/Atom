@@ -183,8 +183,8 @@ class MetricsCollector:
         """Start collecting metrics every 10 minutes"""
         def collector_loop():
             while True:
-                self.add_data_point()
                 time.sleep(600)  # 10 minutes
+                self.add_data_point()
         
         thread = threading.Thread(target=collector_loop, daemon=True)
         thread.start()
