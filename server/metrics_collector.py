@@ -151,8 +151,8 @@ class MetricsCollector:
                 'latency_slope': latency_slope,
                 'memory_slope': memory_slope,
                 'error_trend': error_trend,
-                'risk_score': risk_score,
-                'created_at': datetime.now()
+                'risk_score': risk_score / 100,  # Normalize to 0-1
+                'created_at': firestore.SERVER_TIMESTAMP  # Use server timestamp for sorting
             }
             
             # Add document with auto-generated ID

@@ -1,6 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
-import '../services/csv_loader.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -11,7 +13,7 @@ class DashboardPage extends StatefulWidget {
 
 class _DashboardPageState extends State<DashboardPage>
     with SingleTickerProviderStateMixin {
-  CsvLoaderResult? data;
+  List<Map<String, dynamic>> metricsData = [];
   String? loadError;
   bool isLoading = true;
   // Chat agent state
@@ -62,10 +64,14 @@ class _DashboardPageState extends State<DashboardPage>
     ),
   ];
 
+  late FirebaseFirestore _firestore;
+  late StreamSubscription<QuerySnapshot> _metricsSubscription;
+
   @override
   void initState() {
     super.initState();
-    _loadCsv();
+    _firestore = FirebaseFirestore.instance;
+    _loadMetricsRealtime();
 
     // Initialize chat animation controller
     _chatAnimationController = AnimationController(
@@ -93,6 +99,7 @@ class _DashboardPageState extends State<DashboardPage>
     _chatController.dispose();
     _chatScrollController.dispose();
     _chatAnimationController.dispose();
+    _metricsSubscription.cancel();
     super.dispose();
   }
 
@@ -107,15 +114,35 @@ class _DashboardPageState extends State<DashboardPage>
     }
   }
 
-  Future<void> _loadCsv() async {
+  void _loadMetricsRealtime() {
     try {
-      final result = await CsvLoader.loadFromAssets();
-      if (mounted) {
-        setState(() {
-          data = result;
-          isLoading = false;
-        });
-      }
+      _metricsSubscription = _firestore
+          .collection('metrics')
+          .orderBy('created_at', descending: true)
+          .limit(500)
+          .snapshots()
+          .listen(
+            (snapshot) {
+              if (mounted) {
+                setState(() {
+                  metricsData = snapshot.docs
+                      .map((doc) => {...doc.data(), 'id': doc.id})
+                      .toList()
+                      .reversed
+                      .toList(); // Reverse to get chronological order
+                  isLoading = false;
+                });
+              }
+            },
+            onError: (e) {
+              if (mounted) {
+                setState(() {
+                  loadError = 'Failed to load data: $e';
+                  isLoading = false;
+                });
+              }
+            },
+          );
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -126,16 +153,22 @@ class _DashboardPageState extends State<DashboardPage>
     }
   }
 
+  void _refreshMetrics() {
+    setState(() {
+      isLoading = true;
+    });
+    _loadMetricsRealtime();
+  }
+
   List<FlSpot> _buildSpots(String metricKey, int maxPoints) {
-    if (data == null) return [];
+    if (metricsData.isEmpty) return [];
 
     final spots = <FlSpot>[];
-    final rows = data!.rows;
+    final rows = metricsData;
 
     for (int i = 0; i < rows.length; i++) {
       final row = rows[i];
-      final valueStr = row[metricKey] ?? '';
-      final value = double.tryParse(valueStr);
+      final value = (row[metricKey] as num?)?.toDouble();
       if (value != null) {
         spots.add(FlSpot(i.toDouble(), value));
       }
@@ -156,10 +189,11 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Map<String, double> _getMetricStats(String metricKey) {
-    if (data == null) return {'min': 0, 'max': 0, 'avg': 0, 'current': 0};
+    if (metricsData.isEmpty)
+      return {'min': 0, 'max': 0, 'avg': 0, 'current': 0};
 
-    final values = data!.rows
-        .map((r) => double.tryParse(r[metricKey] ?? ''))
+    final values = metricsData
+        .map((r) => (r[metricKey] as num?)?.toDouble())
         .where((v) => v != null)
         .cast<double>()
         .toList();
@@ -179,13 +213,7 @@ class _DashboardPageState extends State<DashboardPage>
     return Scaffold(
       backgroundColor: const Color(0xFF0A0E14),
       body: SafeArea(
-        child: Stack(
-          children: [
-            _buildBody(),
-            // Animated chat panel overlay
-            _buildAnimatedChatOverlay(),
-          ],
-        ),
+        child: Stack(children: [_buildBody(), _buildAnimatedChatOverlay()]),
       ),
       floatingActionButton: _buildChatFAB(),
     );
@@ -251,7 +279,7 @@ class _DashboardPageState extends State<DashboardPage>
       return _buildLoadingState();
     }
 
-    if (data == null) {
+    if (metricsData.isEmpty) {
       return Center(
         child: Text(
           'No data available',
@@ -291,12 +319,7 @@ class _DashboardPageState extends State<DashboardPage>
       ),
       actions: [
         IconButton(
-          onPressed: () {
-            setState(() {
-              isLoading = true;
-            });
-            _loadCsv();
-          },
+          onPressed: _refreshMetrics,
           icon: const Icon(Icons.refresh_rounded, color: Color(0xFF94A3B8)),
           tooltip: 'Refresh Data',
         ),
@@ -347,23 +370,32 @@ class _DashboardPageState extends State<DashboardPage>
 
   Widget _buildRiskScorePanel() {
     final riskStats = _getMetricStats('risk_score');
-    final currentRisk = riskStats['current'] ?? 0;
-    final avgRisk = riskStats['avg'] ?? 0;
-    final maxRisk = riskStats['max'] ?? 0;
-    final minRisk = riskStats['min'] ?? 0;
+    final rawCurrent = riskStats['current'] ?? 0;
+    final rawAvg = riskStats['avg'] ?? 0;
+    final rawMax = riskStats['max'] ?? 0;
+    final rawMin = riskStats['min'] ?? 0;
 
-    final riskLevel = currentRisk > 0.7
+    // risk_score is already 0-1, multiply by 100 for percentage
+    final currentRisk = rawCurrent; // 0-100%
+    final avgRisk = rawAvg;
+    final maxRisk = rawMax;
+    final minRisk = rawMin;
+
+    // Thresholds based on actual risk percentage (0-100%)
+    // >70% = Critical, >40% = Warning, >20% = Moderate, <=20% = Normal
+    final riskLevel = currentRisk > 70
         ? 'Critical'
-        : currentRisk > 0.4
+        : currentRisk > 40
         ? 'Warning'
-        : currentRisk > 0.2
+        : currentRisk > 20
         ? 'Moderate'
         : 'Normal';
-    final riskColor = currentRisk > 0.7
+
+    final riskColor = currentRisk > 70
         ? const Color(0xFFEF4444)
-        : currentRisk > 0.4
+        : currentRisk > 40
         ? const Color(0xFFF59E0B)
-        : currentRisk > 0.2
+        : currentRisk > 20
         ? const Color(0xFF3B82F6)
         : const Color(0xFF10B981);
 
@@ -388,7 +420,6 @@ class _DashboardPageState extends State<DashboardPage>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header
             Row(
               children: [
                 Container(
@@ -438,7 +469,7 @@ class _DashboardPageState extends State<DashboardPage>
                         width: 160,
                         height: 160,
                         child: CircularProgressIndicator(
-                          value: currentRisk,
+                          value: currentRisk / 100, // needs 0-1 range
                           strokeWidth: 12,
                           backgroundColor: Colors.white.withOpacity(0.1),
                           valueColor: AlwaysStoppedAnimation<Color>(riskColor),
@@ -449,10 +480,10 @@ class _DashboardPageState extends State<DashboardPage>
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            (currentRisk * 100).toStringAsFixed(1),
+                            '${currentRisk.toStringAsFixed(1)}%', // Show as percentage
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 42,
+                              fontSize: 38,
                               fontWeight: FontWeight.bold,
                               letterSpacing: -1,
                             ),
@@ -485,11 +516,11 @@ class _DashboardPageState extends State<DashboardPage>
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          currentRisk > 0.7
+                          currentRisk > 70
                               ? Icons.dangerous_rounded
-                              : currentRisk > 0.4
+                              : currentRisk > 40
                               ? Icons.warning_amber_rounded
-                              : currentRisk > 0.2
+                              : currentRisk > 20
                               ? Icons.info_rounded
                               : Icons.check_circle_rounded,
                           color: riskColor,
@@ -552,11 +583,11 @@ class _DashboardPageState extends State<DashboardPage>
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      currentRisk > 0.7
+                      currentRisk > 0.007
                           ? 'Immediate attention required'
-                          : currentRisk > 0.4
+                          : currentRisk > 0.004
                           ? 'Monitor closely for issues'
-                          : currentRisk > 0.2
+                          : currentRisk > 0.002
                           ? 'System operating normally'
                           : 'All systems optimal',
                       style: TextStyle(
@@ -601,7 +632,6 @@ class _DashboardPageState extends State<DashboardPage>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Header
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
             child: Row(
@@ -642,7 +672,6 @@ class _DashboardPageState extends State<DashboardPage>
               ],
             ),
           ),
-          // Messages scroll area
           SizedBox(
             height: 320,
             child: ListView.builder(
@@ -685,7 +714,6 @@ class _DashboardPageState extends State<DashboardPage>
               },
             ),
           ),
-          // Input row
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             child: Row(
@@ -770,7 +798,6 @@ class _DashboardPageState extends State<DashboardPage>
       _messages.add(_ChatMessage(role: ChatRole.user, text: text));
       _chatController.clear();
     });
-    // Auto-scroll to bottom
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_chatScrollController.hasClients) {
         _chatScrollController.animateTo(
@@ -799,7 +826,7 @@ class _DashboardPageState extends State<DashboardPage>
             ),
             const SizedBox(width: 8),
             Text(
-              '${(value * 100).toStringAsFixed(2)}%',
+              '${value.toStringAsFixed(1)}%', // Show as percentage with 1 decimal
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 14,
@@ -1206,7 +1233,7 @@ class _DashboardPageState extends State<DashboardPage>
                   isLoading = true;
                   loadError = null;
                 });
-                _loadCsv();
+                _refreshMetrics();
               },
               icon: const Icon(Icons.refresh),
               label: const Text('Retry'),
