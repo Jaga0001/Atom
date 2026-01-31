@@ -16,6 +16,7 @@ class ForecastPipeline:
     
     TARGET_METRICS = ["latency", "cpu", "memory", "error_rate"]
     FORECAST_STEPS = 50
+    ACTUAL_STEPS = 50  # Number of recent actual values to fetch
     PIPELINE_INTERVAL = 3600  # 1 hour in seconds
     
     def __init__(self, credentials_path="key.json", models_dir="../models"):
@@ -55,6 +56,38 @@ class ForecastPipeline:
         
         print(f"📊 Loaded {len(self.models)}/{len(self.TARGET_METRICS)} models")
     
+    def fetch_actual_values(self, metric, limit=50):
+        """Fetch recent actual metric values from Firestore."""
+        try:
+            # Query the metrics collection for recent values
+            docs = (self.db.collection('metrics')
+                    .order_by('timestamp', direction=firestore.Query.DESCENDING)
+                    .limit(limit)
+                    .stream())
+            
+            values = []
+            timestamps = []
+            
+            for doc in docs:
+                data = doc.to_dict()
+                if metric in data:
+                    values.append(data[metric])
+                    # Handle both datetime and string timestamps
+                    ts = data.get('timestamp')
+                    if hasattr(ts, 'isoformat'):
+                        timestamps.append(ts.isoformat())
+                    else:
+                        timestamps.append(str(ts))
+            
+            # Reverse to get chronological order
+            values.reverse()
+            timestamps.reverse()
+            
+            return {'values': values, 'timestamps': timestamps}
+        except Exception as e:
+            print(f"   ⚠️ Could not fetch actual {metric}: {e}")
+            return {'values': [], 'timestamps': []}
+    
     def generate_forecasts(self):
         """Generate forecasts for all metrics using pre-trained models."""
         forecasts = {}
@@ -67,6 +100,9 @@ class ForecastPipeline:
                 continue
             
             try:
+                # Fetch actual values
+                actual_data = self.fetch_actual_values(metric, self.ACTUAL_STEPS)
+                
                 # Forecast using pre-trained model
                 forecast_values = self.models[metric].predict(n_periods=self.FORECAST_STEPS)
                 
@@ -77,11 +113,21 @@ class ForecastPipeline:
                 ]
                 
                 forecasts[metric] = {
-                    'values': forecast_values.tolist(),
-                    'timestamps': [ts.isoformat() for ts in future_timestamps]
+                    'actual': {
+                        'values': actual_data['values'],
+                        'timestamps': actual_data['timestamps']
+                    },
+                    'forecast': {
+                        'values': forecast_values.tolist(),
+                        'timestamps': [ts.isoformat() for ts in future_timestamps]
+                    }
                 }
                 
-                print(f"   ✅ {metric.upper()}: {min(forecast_values):.2f} - {max(forecast_values):.2f}")
+                actual_vals = actual_data['values']
+                if actual_vals:
+                    print(f"   ✅ {metric.upper()}: actual={len(actual_vals)} pts ({min(actual_vals):.2f}-{max(actual_vals):.2f}), forecast={min(forecast_values):.2f}-{max(forecast_values):.2f}")
+                else:
+                    print(f"   ✅ {metric.upper()}: no actual data, forecast={min(forecast_values):.2f}-{max(forecast_values):.2f}")
                 
             except Exception as e:
                 print(f"   ❌ {metric}: {e}")
@@ -154,5 +200,7 @@ if __name__ == "__main__":
     
     if result:
         for metric, data in result.items():
-            vals = data['values']
-            print(f"{metric}: min={min(vals):.2f}, max={max(vals):.2f}")
+            actual = data['actual']['values']
+            forecast = data['forecast']['values']
+            actual_info = f"actual: {len(actual)} pts" if actual else "no actual data"
+            print(f"{metric}: {actual_info}, forecast: min={min(forecast):.2f}, max={max(forecast):.2f}")
