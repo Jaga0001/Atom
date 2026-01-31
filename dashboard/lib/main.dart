@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'pages/dashboard_page.dart';
+import 'pages/analytics_page.dart';
 
 void main() {
   runApp(const MyApp());
@@ -26,7 +27,11 @@ class MyApp extends StatelessWidget {
         textTheme: GoogleFonts.poppinsTextTheme(ThemeData.dark().textTheme),
         useMaterial3: true,
       ),
-      home: const DashboardPage(),
+      initialRoute: '/',
+      routes: {
+        '/': (context) => const DashboardPage(),
+        '/analytics': (context) => const AnalyticsPage(),
+      },
     );
   }
 }
