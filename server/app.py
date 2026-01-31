@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from groq import Groq
+from metrics_collector import MetricsCollector
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -27,6 +29,15 @@ Help ML Engineers, SREs, Backend Architects, and Platform Engineers shift from r
 
 # Conversation history
 history = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+# Ensure data directory exists
+os.makedirs('data', exist_ok=True)
+
+# Use the proper MetricsCollector from metrics_collector.py
+metrics_service = MetricsCollector(
+    db_path='data/metrics.db',
+    prometheus_url='http://localhost:9090'
+)
 
 def chat_with_groq(user_input):
     """Send a message to Groq and get a response."""
@@ -60,5 +71,16 @@ def chat():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/metrics', methods=['GET'])
+def get_metrics():
+    """Get latest metrics from database."""
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        metrics = metrics_service.get_latest_metrics(limit)
+        return jsonify({'metrics': metrics})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    metrics_service.start_collector()  # Start the background collector
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
