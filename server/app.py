@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from groq import Groq
 from metrics_collector import MetricsCollector
+from forecast_pipeline import ForecastPipeline
 import os
 import time
 from datetime import datetime
@@ -43,6 +44,12 @@ history = [{"role": "system", "content": SYSTEM_PROMPT}]
 metrics_service = MetricsCollector(
     credentials_path="key.json",
     prometheus_url='http://localhost:9090'
+)
+
+# Initialize Forecast Pipeline
+forecast_pipeline = ForecastPipeline(
+    credentials_path="key.json",
+    models_dir="../models"
 )
 
 def chat_with_groq(user_input):
@@ -87,6 +94,29 @@ def get_metrics():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/forecast', methods=['GET'])
+def get_forecast():
+    """Get latest forecast."""
+    try:
+        forecast = forecast_pipeline.get_latest_forecast()
+        if forecast:
+            return jsonify({'forecast': forecast})
+        return jsonify({'error': 'No forecast available'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/forecast/run', methods=['POST'])
+def run_forecast():
+    """Manually trigger forecast."""
+    try:
+        result = forecast_pipeline.run_pipeline()
+        if result:
+            return jsonify({'status': 'success', 'forecasts': result})
+        return jsonify({'error': 'Forecast failed'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == "__main__":
     metrics_service.start_collector()  # Start the background collector
+    forecast_pipeline.start_scheduled_pipeline()  # Add this line
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
