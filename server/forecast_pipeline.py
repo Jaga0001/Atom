@@ -14,7 +14,7 @@ class ForecastPipeline:
     Runs every hour using pre-trained ARIMA models (no model updates).
     """
     
-    TARGET_METRICS = ["latency", "cpu", "memory", "error_rate"]
+    TARGET_METRICS = ["latency", "cpu", "memory", "error_rate", "risk_score"]
     FORECAST_STEPS = 50
     ACTUAL_STEPS = 50  # Number of recent actual values to fetch
     PIPELINE_INTERVAL = 3600  # 1 hour in seconds
