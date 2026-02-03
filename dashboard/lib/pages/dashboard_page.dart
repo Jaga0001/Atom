@@ -74,7 +74,7 @@ class _DashboardPageState extends State<DashboardPage>
   ];
 
   // Chat API configuration
-  static const String _chatApiUrl = 'https://atom-agentic.onrender.com';
+  static const String _chatApiUrl = 'https://atom-agentic.onrender.com/chat';
   bool _isSendingMessage = false;
 
   late FirebaseFirestore _firestore;
